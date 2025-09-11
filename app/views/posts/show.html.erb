@@ -1,0 +1,13 @@
+<h1><%= @post.title %></h1>
+
+<div class="post-content">
+  <%= simple_format(@post.content) %>
+</div>
+
+<div class="actions">
+  <%= link_to 'Edit', edit_post_path(@post) %>
+  <%= link_to 'Delete', @post, method: :delete, 
+              confirm: 'Are you sure?', 
+              data: { confirm: 'Are you sure?' } %>
+  <%= link_to 'Back to Posts', posts_path %>
+</div>
