@@ -1,4 +1,10 @@
 Rails.application.routes.draw do
+  # User Account API routes
+  post '/signup', to: 'api/users#create'
+  get '/users/:user_id', to: 'api/users#show'
+  patch '/users/:user_id', to: 'api/users#update'
+  post '/close', to: 'api/users#destroy'
+  
   resources :posts
   
   # Define your application routes per the DSL in https://guides.rubyonrails.org/routing.html
