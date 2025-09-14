@@ -2,11 +2,13 @@ module ApiErrorHandler
   extend ActiveSupport::Concern
 
   included do
-    rescue_from ApiExceptions::BaseError, with: :handle_api_error
-    rescue_from ActiveRecord::RecordNotFound, with: :handle_not_found
-    rescue_from ActionController::ParameterMissing, with: :handle_missing_parameters
-    rescue_from JSON::ParserError, with: :handle_json_parse_error
+    # Order matters - more specific exceptions should come first
+    # Rails processes rescue_from in reverse order (most recent first)
     rescue_from StandardError, with: :handle_unexpected_error
+    rescue_from JSON::ParserError, with: :handle_json_parse_error
+    rescue_from ActionController::ParameterMissing, with: :handle_missing_parameters
+    rescue_from ActiveRecord::RecordNotFound, with: :handle_not_found
+    rescue_from ApiExceptions::BaseError, with: :handle_api_error
   end
 
   private
