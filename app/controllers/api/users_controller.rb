@@ -1,5 +1,9 @@
 class Api::UsersController < ApplicationController
+  skip_before_action :verify_authenticity_token
+  
   include ApiAuthentication
+  include ApiErrorHandler
+  include InputValidator
 
   before_action :authenticate_user, except: [:create]
   before_action :set_user, only: [:show, :update]
@@ -7,23 +11,33 @@ class Api::UsersController < ApplicationController
 
   # POST /signup
   def create
-    begin
-      user_data = user_params
-      @user = User.new(user_data)
+    user_data = validate_signup_params
+    @user = User.new(user_data)
 
-      if @user.save
-        render json: {
-          message: "Account successfully created",
-          user: UserPresenter.new(@user).as_json
-        }, status: :ok
-      else
-        render_validation_error(@user.errors)
-      end
-    rescue ActionController::ParameterMissing => e
+    if @user.save
+      Rails.logger.info({
+        event: "user_created",
+        user_id: @user.user_id,
+        ip: request.remote_ip,
+        user_agent: request.user_agent,
+        timestamp: Time.current
+      }.to_json)
+      
       render json: {
-        message: "Account creation failed",
-        cause: "Required user_id and password"
-      }, status: :bad_request
+        message: "Account successfully created",
+        user: UserPresenter.new(@user).as_json
+      }, status: :ok
+      return
+    else
+      Rails.logger.warn({
+        event: "user_creation_failed",
+        user_id: user_data[:user_id],
+        errors: @user.errors.messages,
+        ip: request.remote_ip,
+        timestamp: Time.current
+      }.to_json)
+      
+      raise ApiExceptions::AccountCreationError.new(determine_create_error_cause(@user.errors))
     end
   end
 
@@ -37,22 +51,46 @@ class Api::UsersController < ApplicationController
 
   # PATCH /users/:user_id
   def update
-    permitted_params = update_params
-    return if performed? # Early return if validation error was rendered
+    permitted_params = validate_update_params
 
     if @user.update(permitted_params)
+      Rails.logger.info({
+        event: "user_updated",
+        user_id: @user.user_id,
+        updated_fields: permitted_params.keys,
+        ip: request.remote_ip,
+        timestamp: Time.current
+      }.to_json)
+      
       render json: {
         message: "User successfully updated",
         user: UserPresenter.new(@user).as_json
       }, status: :ok
     else
-      render_update_validation_error(@user.errors)
+      Rails.logger.warn({
+        event: "user_update_failed",
+        user_id: @user.user_id,
+        errors: @user.errors.messages,
+        ip: request.remote_ip,
+        timestamp: Time.current
+      }.to_json)
+      
+      raise ApiExceptions::UserUpdateError.new("String length limit exceeded or containing invalid characters")
     end
   end
 
   # POST /close
   def destroy
+    user_id = current_user.user_id
     current_user.destroy
+    
+    Rails.logger.info({
+      event: "user_deleted",
+      user_id: user_id,
+      ip: request.remote_ip,
+      timestamp: Time.current
+    }.to_json)
+    
     render json: {
       message: "Account and user successfully removed"
     }, status: :ok
@@ -62,72 +100,67 @@ class Api::UsersController < ApplicationController
 
   def set_user
     @user = User.find_by(user_id: params[:user_id])
-    unless @user
-      render json: { message: "No user found" }, status: :not_found
-    end
+    raise ApiExceptions::UserNotFoundError.new unless @user
   end
 
   def check_user_permission
     return unless @user
-    unless current_user.user_id == @user.user_id
-      render json: { message: "No permission for update" }, status: :forbidden
-    end
+    raise ApiExceptions::PermissionDeniedError.new unless current_user.user_id == @user.user_id
   end
 
-  def user_params
-    params.require(:user_id)
-    params.require(:password)
+  def validate_signup_params
+    # Validate content type
+    unless request.content_type&.include?('application/json')
+      raise ApiExceptions::InvalidParametersError.new("Content-Type must be application/json")
+    end
+
+    # Extract and validate parameters
+    user_id = params[:user_id]
+    password = params[:password]
+
+    # Check required parameters
+    raise ApiExceptions::MissingParametersError.new(:signup) if user_id.blank? || password.blank?
+
+    # Sanitize input
+    user_id = sanitize_string(user_id)
+    password = sanitize_password(password)
+
+    # Additional validation
+    validate_user_id_format(user_id)
+    validate_password_format(password)
+
     {
-      user_id: params[:user_id],
-      password: params[:password]
+      user_id: user_id,
+      password: password
     }
   end
 
-  def update_params
-    permitted = params.permit(:nickname, :comment)
+  def validate_update_params
+    # Get permitted parameters - try both top level and nested user params
+    nickname = params[:nickname] || (params[:user] && params[:user][:nickname])
+    comment = params[:comment] || (params[:user] && params[:user][:comment])
 
     # Check if at least one field is provided
-    if permitted.empty? || (permitted[:nickname].nil? && permitted[:comment].nil?)
-      render json: {
-        message: "User updation failed",
-        cause: "Required nickname or comment"
-      }, status: :bad_request
-      return {}
+    if nickname.nil? && comment.nil?
+      raise ApiExceptions::MissingParametersError.new(:update)
     end
 
-    # Check for invalid fields (user_id or password)
-    if params[:user_id] && params[:user_id] != current_user.user_id
-      render json: {
-        message: "User updation failed",
-        cause: "Not updatable user_id and password"
-      }, status: :bad_request
-      return {}
+    # Sanitize and validate inputs
+    result = {}
+    
+    unless nickname.nil?
+      nickname = sanitize_string(nickname) if nickname.present?
+      validate_nickname_format(nickname) if nickname.present?
+      result[:nickname] = nickname
     end
 
-    if params[:password]
-      render json: {
-        message: "User updation failed",
-        cause: "Not updatable user_id and password"
-      }, status: :bad_request
-      return {}
+    unless comment.nil?
+      comment = sanitize_string(comment) if comment.present?
+      validate_comment_format(comment) if comment.present?
+      result[:comment] = comment
     end
 
-    permitted
-  end
-
-  def render_validation_error(errors)
-    cause = determine_create_error_cause(errors)
-    render json: {
-      message: "Account creation failed",
-      cause: cause
-    }, status: :bad_request
-  end
-
-  def render_update_validation_error(errors)
-    render json: {
-      message: "User updation failed",
-      cause: "String length limit exceeded or containing invalid characters"
-    }, status: :bad_request
+    result
   end
 
   def determine_create_error_cause(errors)
@@ -141,6 +174,29 @@ class Api::UsersController < ApplicationController
       end
     else
       "Input length is incorrect"
+    end
+  end
+
+  def validate_password_format(password)
+    if password.length < 8 || password.length > 20
+      raise ApiExceptions::AccountCreationError.new("Input length is incorrect")
+    end
+    
+    # Check for printable ASCII without spaces/control codes
+    unless password.match?(/\A[[:print:]&&[^ \t\n\r\f\v]]+\z/)
+      raise ApiExceptions::AccountCreationError.new("Incorrect character pattern")
+    end
+  end
+
+  def validate_nickname_format(nickname)
+    if nickname.present? && nickname.length > 30
+      raise ApiExceptions::UserUpdateError.new("String length limit exceeded or containing invalid characters")
+    end
+  end
+
+  def validate_comment_format(comment)
+    if comment.present? && comment.length > 100
+      raise ApiExceptions::UserUpdateError.new("String length limit exceeded or containing invalid characters")
     end
   end
 end
